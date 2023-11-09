@@ -14,8 +14,11 @@ mod switch;
 #[allow(clippy::module_inception)]
 mod task;
 
+use crate::config::MAX_SYSCALL_NUM;
 use crate::loader::{get_app_data, get_num_app};
+use crate::mm::{VirtPageNum, PhysPageNum, VirtAddr, MapPermission};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time_us;
 use crate::trap::TrapContext;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -79,6 +82,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let next_task = &mut inner.tasks[0];
         next_task.task_status = TaskStatus::Running;
+        next_task.scheduling_time = get_time_us();
         let next_task_cx_ptr = &next_task.task_cx as *const TaskContext;
         drop(inner);
         let mut _unused = TaskContext::zero_init();
@@ -140,6 +144,9 @@ impl TaskManager {
             let mut inner = self.inner.exclusive_access();
             let current = inner.current_task;
             inner.tasks[next].task_status = TaskStatus::Running;
+            if 0 == inner.tasks[next].scheduling_time {
+                inner.tasks[next].scheduling_time = get_time_us();
+            }
             inner.current_task = next;
             let current_task_cx_ptr = &mut inner.tasks[current].task_cx as *mut TaskContext;
             let next_task_cx_ptr = &inner.tasks[next].task_cx as *const TaskContext;
@@ -153,6 +160,64 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// translate user mod virt addr to phy addr
+    fn translate_vpn_to_ppn(&self, vpn: VirtPageNum) -> PhysPageNum {
+        let inner = self.inner.exclusive_access();
+        let current_task = &inner.tasks[inner.current_task];
+        current_task.memory_set.translate(vpn).unwrap().ppn()
+    }
+
+    /// obtain current task scheduling time
+    fn get_current_task_scheduling_time(&self) -> usize {
+        let inner = self.inner.exclusive_access();
+        inner.tasks[inner.current_task].scheduling_time
+    }
+
+    /// count current task syscall id times
+    fn count_current_syscall(&self, syscall_id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_task = &mut inner.tasks[current];
+        current_task.syscall_times[syscall_id] += 1;
+    }
+
+    /// obtain current task syscall times
+    fn get_current_syscall_times(&self) -> [u32; MAX_SYSCALL_NUM] {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times.clone()
+    }
+
+    /// check request map area is already mapped
+    fn check_vpn_range_arealdy_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_task = &inner.tasks[current];
+
+        info!("check vpn range {:?} -> {:?}", start_va.floor(), end_va.ceil());
+
+        current_task.memory_set.is_already_mapped(start_va, end_va)
+    }
+
+    /// add new map area
+    fn add_map_area(&self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_task = &mut inner.tasks[current];
+
+        current_task.memory_set.insert_framed_area(start_va, end_va, permission);
+    }
+
+    /// remove mapped area
+    fn remove_map_area(&self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        let current_task = &mut inner.tasks[current];
+
+        current_task.memory_set.remove_framed_area(start_va, end_va)
+    }
+
 }
 
 /// Run the first task in task list.
@@ -201,4 +266,39 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// translate user mod virt addr to phy addr
+pub fn translate_vpn_to_ppn(vpn: VirtPageNum) -> PhysPageNum {
+    TASK_MANAGER.translate_vpn_to_ppn(vpn)
+}
+
+/// obtain current task scheduling time
+pub fn get_current_task_scheduling_time() -> usize {
+    TASK_MANAGER.get_current_task_scheduling_time()
+}
+
+/// count current task syscall id times
+pub fn count_current_syscall(syscall_id: usize) {
+    TASK_MANAGER.count_current_syscall(syscall_id);
+}
+
+/// obtain current task syscall times
+pub fn get_current_syscall_times() -> [u32; MAX_SYSCALL_NUM] {
+    TASK_MANAGER.get_current_syscall_times()
+}
+
+/// check request map area is already mapped
+pub fn check_vpn_range_arealdy_mapped(start_va: VirtAddr, end_va: VirtAddr) -> bool {
+    TASK_MANAGER.check_vpn_range_arealdy_mapped(start_va, end_va)
+}
+
+/// add new map area
+pub fn add_new_area(start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) {
+    TASK_MANAGER.add_map_area(start_va, end_va, permission);
+}
+
+/// remove map area
+pub fn remove_map_area(start_va: VirtAddr, end_va: VirtAddr) -> isize {
+    TASK_MANAGER.remove_map_area(start_va, end_va)
 }

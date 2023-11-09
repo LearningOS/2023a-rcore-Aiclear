@@ -63,6 +63,24 @@ impl MemorySet {
             None,
         );
     }
+
+    /// remove framed area
+    pub fn remove_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        for (idx, area) in self.areas.iter_mut().enumerate() {
+            if area.vpn_range.get_start() == start_va.floor() && area.vpn_range.get_end() == end_va.ceil() {
+                // unmap
+                area.unmap(&mut self.page_table);
+
+                // remove
+                self.areas.remove(idx);
+
+                return 0;
+            }
+        }
+
+        -1
+    }
+
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
@@ -261,6 +279,15 @@ impl MemorySet {
         } else {
             false
         }
+    }
+
+    /// the range is already mapped
+    pub fn is_already_mapped(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.areas
+            .iter()
+            .find(|area| area.vpn_range.get_start() >= start.floor() 
+                                    && area.vpn_range.get_end() <= end.ceil())
+            .is_some()
     }
 }
 /// map area structure, controls a contiguous piece of virtual memory
